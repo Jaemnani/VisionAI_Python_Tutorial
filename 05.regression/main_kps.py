@@ -235,8 +235,8 @@ train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=False)
 valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, drop_last=False)
 
-# model = ArrowKeypointHeatmapNet().to(device)
-model = DeeperArrowKeypointHeatmapNet().to(device)
+model = ArrowKeypointHeatmapNet().to(device)
+# model = DeeperArrowKeypointHeatmapNet().to(device)
 
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of parameters:", total_params)
@@ -252,7 +252,7 @@ best_loss = np.inf
 best_model_wts = copy.deepcopy(model.state_dict())
 best_epoch = 0
 
-num_epochs = 5
+num_epochs = 20
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     running_loss = 0.0
     # img, kps, heatmap
