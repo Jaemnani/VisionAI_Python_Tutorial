@@ -85,6 +85,35 @@ def make_arrow_image(
 
     return rotated, angle, rotated_sp, rotated_ep
 
+color_map = [
+    (  0,   0, 255),  #  0/19: (R=255, G=0, B=0) -> BGR=(0,0,255)
+    # (  7,   0, 248),  #  1/19
+    # ( 13,   0, 242),  #  2/19
+    # ( 20,   0, 235),  #  3/19
+    # ( 27,   0, 228),  #  4/19
+    # ( 34,   0, 222),  #  5/19
+    # ( 40,   0, 215),  #  6/19
+    # ( 47,   0, 208),  #  7/19
+    # ( 54,   0, 202),  #  8/19
+    # ( 61,   0, 195),  #  9/19
+    # ( 67,   0, 188),  # 10/19
+    # ( 74,   0, 181),  # 11/19
+    # ( 81,   0, 175),  # 12/19
+    # ( 88,   0, 168),  # 13/19
+    # ( 94,   0, 161),  # 14/19
+    # (101,   0, 155),  # 15/19
+    # (108,   0, 148),  # 16/19
+    # (115,   0, 141),  # 17/19
+    # (121,   0, 135),  # 18/19
+    (128,   0, 128),  # 19/19: (R=128, G=0, B=128) -> BGR=(128,0,128)
+]
+
+def draw_point_of_keypoints(img, keypoints):
+    img = img.copy()
+    for kp_idx, kp in enumerate(keypoints):
+        img = cv2.circle(img, kp, radius=3, color=color_map[kp_idx], thickness=-1)
+    return img
+    
 def main():
     image_path = "./images/"
     direct_path = "./directions/"

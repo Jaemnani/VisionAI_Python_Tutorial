@@ -10,7 +10,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 from glob import glob
-from make_arrow import make_arrow_image, create_keypoint_heatmap, create_heatmap
+from make_arrow import make_arrow_image, create_keypoint_heatmap, create_heatmap, draw_point_of_keypoints
 import copy
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ExponentialLR, CosineAnnealingLR, ReduceLROnPlateau
 
@@ -62,11 +62,12 @@ class EarlyStopping:
 
 class ArrowKeypointsDataset(Dataset):
     # def __init__(self, image_dir, angle_dir, transform=None):
-    def __init__(self, image_dir, label_dir, sigma=2.0, transform=None):
+    def __init__(self, image_dir, label_dir, target_size=(64, 64), sigma=2.0, transform=None):
         self.image_dir = image_dir
         self.image_paths = glob(self.image_dir + "*.jpg")
         # self.angle_dir = angle_dir
         self.label_dir = label_dir
+        self.target_size = target_size
         
         self.sigma = sigma
         self.transform = transform
@@ -80,7 +81,7 @@ class ArrowKeypointsDataset(Dataset):
         lbl_path = self.label_dir + os.path.basename(img_path).replace("img_", "key_").replace('.jpg', '.txt')
         
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (64, 64))
+        img = cv2.resize(img, self.target_size)
         
         with open(lbl_path, 'r') as af:
             # angle = int(np.array(af.readlines()).flatten()[0]) / 360.
@@ -91,7 +92,7 @@ class ArrowKeypointsDataset(Dataset):
         # angle_rad = np.deg2rad(angle)
         # label = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
         sp, ep  = kps
-        heatmap = create_keypoint_heatmap(sp, ep, 64, sigma=self.sigma)
+        heatmap = create_keypoint_heatmap(sp, ep, self.target_size, sigma=self.sigma)
 
         if self.transform:
             img = self.transform(img)
@@ -190,6 +191,7 @@ class DeeperArrowKeypointHeatmapNet(nn.Module):
         # self.fc1 = nn.Linear(128 * 4 * 4, 128)
         # self.dropout = nn.Dropout(p=0.5)
         # self.fc2 = nn.Linear(128, 2)
+        self.conv4 = nn.Conv2d(128, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
 
     def forward(self, x):
         # 차례로 블록 통과
@@ -198,7 +200,7 @@ class DeeperArrowKeypointHeatmapNet(nn.Module):
         x = self.block3(x)  # -> shape: (N,64,8,8)
         x = self.block4(x)  # -> shape: (N,128,4,4)
         
-        x = F.interpolate(x, scale_factor=4, mode='bilinear', align_corners=False)
+        x = F.interpolate(x, scale_factor=8, mode='bilinear', align_corners=False)
         x = self.conv4(x)
         # 평탄화
         # x = x.view(x.size(0), -1)  # (N, 128*4*4)
@@ -208,7 +210,8 @@ class DeeperArrowKeypointHeatmapNet(nn.Module):
         return x
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -232,8 +235,8 @@ train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=False)
 valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, drop_last=False)
 
-model = ArrowKeypointsDataset().to(device)
-# model = DeeperArrowKeypointsDataset().to(device)
+# model = ArrowKeypointHeatmapNet().to(device)
+model = DeeperArrowKeypointHeatmapNet().to(device)
 
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of parameters:", total_params)
@@ -249,10 +252,12 @@ best_loss = np.inf
 best_model_wts = copy.deepcopy(model.state_dict())
 best_epoch = 0
 
-num_epochs = 200
+num_epochs = 5
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     running_loss = 0.0
-    for images, hmaps in train_loader:
+    # img, kps, heatmap
+    for images, kps, hmaps in train_loader: 
+
         images = images.to(device)
         # angles = angles.to(device).float().view(-1, 1)  # Ensure angles are the correct shape
         hmaps = hmaps.to(device)
@@ -272,7 +277,7 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     model.eval()  # 모델을 평가 모드로 설정
     val_loss = 0.0
     with torch.no_grad():  # 그래디언트 계산 비활성화
-        for images, hmaps in valid_loader:
+        for images, kps, hmaps in valid_loader:
             images = images.to(device)
             # angles = angles.to(device).float().view(-1, 1)
             hmaps = hmaps.to(device)
@@ -302,50 +307,95 @@ def img_preprocess(img, torch_trans = transform):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img = cv2.resize(img, (64, 64))
     img = torch_trans(img)
-    img = img.unsqueeze(0)
-    
+    img = img.unsqueeze(0)    
     return img
 
-
-def angle_difference(a, b):
-    diff = abs(a - b) % 360
-    if diff > 180:
-        diff = 360 - diff
-    return diff
+# def angle_difference(a, b):
+#     diff = abs(a - b) % 360
+#     if diff > 180:
+#         diff = 360 - diff
+#     return diff
 
 def post_processing(output):
-    sin_val, cos_val = output[0].cpu().detach().numpy()
+    # get keypoint from heatmap
+    pred_coords = []
+    for hm_idx, hm in enumerate(output[0]):
+        idx = torch.argmax(hm)
+        y = idx // 64
+        x = idx % 64
+        pred_coords.append((x.item(), y.item()))
+    return pred_coords
 
-    angle_rad = np.arctan2(sin_val, cos_val)
-    angle_deg = np.rad2deg(angle_rad)
-    if angle_deg < 0:
-        angle_deg += 360
-    return angle_deg
+    return
+    # sin_val, cos_val = output[0].cpu().detach().numpy()
+
+    # angle_rad = np.arctan2(sin_val, cos_val)
+    # angle_deg = np.rad2deg(angle_rad)
+    # if angle_deg < 0:
+    #     angle_deg += 360
+    # return angle_deg
     # output = output.flatten()[0] * 360.
     # return output.item()
 
+def calc_diff_of_keypoints(gt_kps, pred_kps):
+    if len(gt_kps) != len(pred_kps):
+        return -1
+    
+    dist_kps = []
+    for gt, pred in zip(gt_kps, pred_kps):
+        dist_kp = np.sqrt((pred[0] - gt[0]) ** 2 + (pred[1] - gt[1]) ** 2)
+        dist_kps.append(dist_kp)
+
+    return dist_kps
+
+    # dist_sp = np.sqrt((pred_sp[0]-sp[0])**2 + (pred_sp[1]-sp[1])**2)
+
+
+
 model.eval()
-angle_threshold = 2.0
-diffs = []
-correct = 0
+
+# angle_threshold = 2.0
+# diffs = []
+# correct = 0
+
+diff_kps_threshold = 2.0
+diffs_kps = []
+correct_kps = 0
+dst_path = "./kp_pred/"
+os.makedirs(dst_path, exist_ok=True)
+
 test_cnt = 100
 for i in range(test_cnt):
     test_img, test_angle, test_sp, test_ep = make_arrow_image()
+    ground_truth_kps = np.vstack((test_sp, test_ep))
     input_image = img_preprocess(test_img).to(device)
     output = model(input_image)
     result = post_processing(output)
+
+    result_diff = calc_diff_of_keypoints(ground_truth_kps, result)
+    result_mean_diff = np.mean(result_diff)
+
+    if result_mean_diff < diff_kps_threshold:
+        correct_kps += 1
+    diffs_kps.append(result_mean_diff)
+    print("gt->pred : sp(%.2f, %.2f)->(%.2f, %.2f)(%.2f), ep(%.2f, %.2f)->(%.2f, %.2f)(%.2f)"%
+          (ground_truth_kps[0][0], ground_truth_kps[0][1], result[0][0], result[0][1], result_diff[0], 
+           ground_truth_kps[1][0], ground_truth_kps[1][1], result[1][0], result[1][1], result_diff[1]))
+    result_img = draw_point_of_keypoints(test_img, result)
+    save_path = dst_path + "%.6d.jpg"%(i)
+    cv2.imwrite(save_path, result_img)
+
     # diff = abs(test_angle - result)
-    diff = angle_difference(test_angle, result)
-    if diff < angle_threshold:
-        correct += 1
-    diffs.append(diff)
-    print("gt:", test_angle, "pred:", result, "diff:", diff)
-diffs = np.array(diffs)
-print("acc: ", float(correct) / test_cnt )
-print("mean/max/min diff:", np.mean(diffs), ",",np.max(diffs),",", np.min(diffs))
+    # diff = angle_difference(test_angle, result)
+    # if diff < angle_threshold:
+    #     correct += 1
+    # diffs.append(diff)
+    # print("gt:", test_angle, "pred:", result, "diff:", diff)
+# diffs = np.array(diffs)
+# print("acc: ", float(correct) / test_cnt )
+# print("mean/max/min diff:", np.mean(diffs), ",",np.max(diffs),",", np.min(diffs))
 
-
-
-
+print("acc: ", float(correct_kps) / test_cnt )
+print("mean/max/min diff:", np.mean(diffs_kps), ",",np.max(diffs_kps),",", np.min(diffs_kps))
 
 print("done")

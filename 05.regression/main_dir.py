@@ -223,7 +223,8 @@ train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, drop_last=False)
 valid_loader = DataLoader(valid_dataset, batch_size=128, shuffle=False, drop_last=False)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
 
 # model = ArrowNet().to(device)
 model = DeeperArrowNet().to(device)
