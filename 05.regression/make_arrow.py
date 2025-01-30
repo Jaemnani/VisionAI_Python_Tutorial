@@ -4,6 +4,18 @@ import random
 import os
 from tqdm import tqdm
 
+def create_heatmap(h, w, px, py, sigma=2.0):
+    xs = np.arange(w)
+    ys = np.arange(h)
+    xx, yy = np.meshgrid(xs, ys)
+    heatmap = np.exp(-((xx - px)**2 + (yy - py)**2) / (2 * sigma**2))
+    return heatmap
+
+def create_keypoint_heatmap(sp, ep, img_size=(64, 64), sigma=2.0):
+    heatmap_sp = create_heatmap(img_size[1], img_size[0], sp[0], sp[1], sigma=sigma)
+    heatmap_ep = create_heatmap(img_size[1], img_size[0], ep[0], ep[1], sigma=sigma)
+    heatmap_2ch = np.stack([heatmap_sp, heatmap_ep], axis=0)
+    return heatmap_2ch
 
 def make_arrow_image(
         canvas_size = (64, 64), 
@@ -69,7 +81,7 @@ def make_arrow_image(
     # tmp = cv2.circle(rotated.copy(), rotated_sp, radius=3, color=(0, 0, 255), thickness=-1)
     # tmp = cv2.circle(tmp, rotated_ep, radius=3, color=(0, 0, 255), thickness=-1)
 
-
+    kps_2ch = create_keypoint_heatmap(rotated_sp, rotated_ep, img_size=canvas_size, sigma=2.0)
 
     return rotated, angle, rotated_sp, rotated_ep
 
