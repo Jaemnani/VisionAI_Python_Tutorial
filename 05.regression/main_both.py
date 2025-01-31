@@ -120,6 +120,79 @@ class ConvBNReLU(nn.Module):
         x = self.relu(x)
         return x
     
+
+class ResidualBlock(nn.Module):
+    """
+    가장 간단한 형태의 residual block:
+    x -> Conv -> BN -> ReLU -> Conv -> BN + skip -> ReLU
+    """
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1   = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2   = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        identity = x
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        out = self.bn2(self.conv2(out))
+        out += identity  # skip connection
+        out = F.relu(out, inplace=True)
+        return out
+    
+class ArrowMultiResNet(nn.Module):
+    def __init__(self):
+        super(ArrowMultiResNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(16)
+
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(32)
+
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # 추가된 컨볼루션 계층
+        self.bn3 = nn.BatchNorm2d(64)
+
+        self.pool = nn.MaxPool2d(2, 2)
+        self.relu = nn.ReLU()
+        # Angle Head
+        self.angle_res = ResidualBlock(channels=64)
+        # 계산된 특성 맵의 크기와 필터 수를 기반으로 첫 번째 완전 연결 계층의 입력 크기 조정
+        # 두 번의 풀링을 거치므로, 64 -> 32 -> 16 크기의 특성 맵이 됩니다.
+        self.fc1 = nn.Linear(64 * 16 * 16, 128)  # 특성 맵 크기와 채널 수에 맞춰 조정
+        self.fc2 = nn.Linear(128, 2)
+        self.dropout = nn.Dropout(p=0.25)
+
+        # Keypoint Head
+        self.kp_res = ResidualBlock(channels=64)
+        self.conv4 = nn.Conv2d(64, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
+
+    def forward(self, x): # torch.Size([32, 1, 64, 64])
+        # x = self.pool(self.relu(self.conv1(x))) # torch.Size([32, 16, 32, 32])
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.pool(x)
+        
+        # x = self.pool(self.relu(self.conv2(x))) # torch.Size([32, 32, 16, 16])
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.pool(x)
+
+        # x = self.pool(self.relu(self.conv3(x))) # torch.Size([32, 64, 8, 8])
+        x_feat = self.relu(self.bn3(self.conv3(x)))
+        
+        # Angle Head
+        ah = self.angle_res(x_feat)
+        # x_ang = x_ang.view(-1, 64 * 8 * 8)
+        x_ang = ah.view(ah.size(0), -1)
+        x_ang = self.relu(self.fc1(x_ang))
+        angle_out = self.fc2(x_ang)
+
+        # Keypoint Head
+        kh = self.kp_res(x_feat)
+        x_hm = F.interpolate(kh, scale_factor=4, mode='bilinear', align_corners=False)
+        heatmap_out = self.conv4(x_hm)
+        return angle_out, heatmap_out
+
+
 class ArrowKeypointHeatmapNet(nn.Module):
     def __init__(self):
         super(ArrowKeypointHeatmapNet, self).__init__()
@@ -196,9 +269,7 @@ class ArrowMultiNet(nn.Module):
         x_ang = x_ang.view(-1, 64 * 8 * 8)
         x_ang = self.relu(self.fc1(x_ang))
         angle_out = self.fc2(x_ang)
-        
-        
-        
+
         x_hm = F.interpolate(x_feat, scale_factor=4, mode='bilinear', align_corners=False)
 
         heatmap_out = self.conv4(x_hm)
@@ -349,7 +420,8 @@ valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, drop_last
 
 # model = ArrowKeypointHeatmapNet().to(device)
 # model = DeeperArrowKeypointHeatmapNet().to(device)
-model = ArrowMultiNet().to(device)
+# model = ArrowMultiNet().to(device)
+model = ArrowMultiResNet().to(device)
 
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of parameters:", total_params)
@@ -375,6 +447,8 @@ num_epochs = 200
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     running_loss = 0.0
     # img, kps, heatmap
+    losses_angle = []
+    losses_heatmap = []
     for images, angle_label, kps, heatmap_label in train_loader: 
 
         images = images.to(device)
@@ -388,12 +462,9 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
         loss_angle = angle_criterion(angle_out, angle_label)
         loss_heatmap = heatmap_criterion(heatmap_out, heatmap_label)
 
-        if loss_angle >= loss_heatmap:
-            w_angle = 1.
-            w_heatmap = loss_heatmap/loss_angle
-        else:
-            w_heatmap = 1.
-            w_angle = loss_angle/loss_heatmap
+        losses_angle.append(loss_angle.item())
+        losses_heatmap.append(loss_heatmap.item())
+
         # print(f'w_angle:{w_angle:.4f}, w_heatmap:{w_heatmap:.4f}')    
         loss = (loss_angle * w_angle) + (loss_heatmap * w_heatmap)
 
@@ -404,6 +475,17 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
         optimizer.step()
 
         running_loss += loss.item()
+
+    mean_loss_angle = np.mean(losses_angle)
+    mean_loss_heatmap = np.mean(losses_heatmap)
+
+    if mean_loss_angle >= mean_loss_heatmap:
+            w_angle = 1.
+            w_heatmap = mean_loss_heatmap / mean_loss_angle
+    else:
+        w_heatmap = 1.
+        w_angle = 1.
+        
     scheduler.step()
     current_lr = scheduler.get_last_lr()[0]
 
@@ -433,7 +515,7 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
         
     avg_train_loss = (running_loss / len(train_loader))
     avg_valid_loss = (val_loss / len(valid_loader))
-    print(f'Epoch [{epoch + 1}/{num_epochs}], LR={current_lr:.6f}, Train Loss: {avg_train_loss:.6f}(a:h={loss_angle:.5f}:{loss_heatmap:.5f}) Valid Loss: {avg_valid_loss:.6f}')
+    print(f'Epoch [{epoch + 1}/{num_epochs}], LR={current_lr:.6f}, Train Loss: {avg_train_loss:.6f}(a:h={loss_angle:.5f}:{loss_heatmap:.5f})(wla:wlh={w_angle:.2f}:{w_heatmap:.2f}) Valid Loss: {avg_valid_loss:.6f}')
     
     early_stopping(val_loss, model)
     if early_stopping.early_stop:
