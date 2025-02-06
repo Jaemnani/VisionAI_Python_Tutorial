@@ -598,7 +598,6 @@ for i in range(test_cnt):
            ground_truth_kps[1][0], ground_truth_kps[1][1], heatmap_result[1][0], heatmap_result[1][1], result_diff[1]))
     result_img = draw_point_of_keypoints(test_img, heatmap_result)
     save_path = dst_path + "%.6d.jpg"%(i)
-    cv2.imwrite(save_path, result_img)
 
     diff = abs(test_angle - angle_result)
     diff = angle_difference(test_angle, angle_result)
@@ -606,6 +605,11 @@ for i in range(test_cnt):
         correct += 1
     diffs.append(diff)
     print("ANGLE gt:", test_angle, "pred:", angle_result, "diff:", diff)
+    save_text = str(int(np.round(angle_result))) + "/" + str(test_angle)
+    cv2.putText(result_img, save_text, (2,10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0,0,255), 1, cv2.LINE_AA)
+    
+    cv2.imwrite(save_path, result_img)
+
 diffs = np.array(diffs)
 print(" * Angle Prediction")
 print("acc: ", float(correct) / test_cnt )
