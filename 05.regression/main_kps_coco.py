@@ -62,7 +62,7 @@ class EarlyStopping:
 
 class ArrowKeypointsDataset(Dataset):
     # def __init__(self, image_dir, angle_dir, transform=None):
-    def __init__(self, image_dir, label_dir, target_size=(64, 64), sigma=2.0, transform=None, kpts_cnt = 8):
+    def __init__(self, image_dir, label_dir, target_size=(96, 96), sigma=2.0, transform=None, kpts_cnt = 8):
         self.image_dir = image_dir
         self.image_paths = glob(self.image_dir + "*.jpg")
         # self.angle_dir = angle_dir
@@ -91,6 +91,8 @@ class ArrowKeypointsDataset(Dataset):
             labels = [pts.split(",") for pts in af.readlines()]
             kps = np.array(labels).flatten().astype(float).reshape(self.kpts_cnt,-1) # sp, ep
             
+        conf = np.array([0. if kp[0] < 0 or kp[1] < 0 else 1. for kp in kps])
+        conf = torch.from_numpy(conf).float()
         # angle_rad = np.deg2rad(angle)
         # label = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
         
@@ -104,7 +106,7 @@ class ArrowKeypointsDataset(Dataset):
         else:
             img = torch.from_numpy(img).unsqueeze(0).float()
             heatmap = torch.from_numpy(heatmap).float()
-        return img, kps, heatmap
+        return img, conf, kps, heatmap
 
 class ConvBNReLU(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -143,6 +145,9 @@ class ArrowKeypointHeatmapNet(nn.Module):
         # self.conv4 = nn.Conv2d(64, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
         self.conv4 = nn.Conv2d(64, 8, kernel_size=3, padding=1) # heatmap 8, pod
 
+        # confidence 8
+        self.conf_fc = nn.Linear(64, 8)
+
     def forward(self, x): # torch.Size([32, 1, 64, 64])
         # x = self.pool(self.relu(self.conv1(x))) # torch.Size([32, 16, 32, 32])
         x = self.relu(self.bn1(self.conv1(x)))
@@ -152,13 +157,23 @@ class ArrowKeypointHeatmapNet(nn.Module):
         x = self.relu(self.bn2(self.conv2(x)))
         x = self.pool(x)
 
-        # x = self.pool(self.relu(self.conv3(x))) # torch.Size([32, 64, 8, 8])
         x = self.relu(self.bn3(self.conv3(x)))
-        # x = self.pool(x)
-        x = F.interpolate(x, scale_factor=4, mode='bilinear', align_corners=False)
 
-        x = self.conv4(x)
-        return x
+        # confidence head
+        x_conf = F.adaptive_avg_pool2d(x, (1,1))
+        x_conf = x_conf.view(x_conf.size(0), -1)
+        confidences = self.conf_fc(x_conf)
+        confidences = F.sigmoid(confidences)
+
+
+        # heatmap head
+        x_hm = F.interpolate(x, scale_factor=4, mode='bilinear', align_corners=False)
+        heatmaps = self.conv4(x_hm)
+
+        # print("confidence shape :", confidences.shape)
+        # print("heatpmaps shape : ", heatmaps.shape)
+        
+        return confidences, heatmaps
 
 class DeeperArrowKeypointHeatmapNet(nn.Module):
     def __init__(self):
@@ -241,6 +256,7 @@ train_size = int(len(dataset) * 0.8)
 # valid_size = len(dataset) - train_size
 valid_size = int(len(dataset) * 0.1)
 test_size = len(dataset) - train_size - valid_size
+print(test_size)
 train_dataset, valid_dataset, test_dataset = random_split(dataset, [train_size, valid_size, test_size])
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=False)
 valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, drop_last=False)
@@ -252,7 +268,10 @@ model = ArrowKeypointHeatmapNet().to(device)
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of parameters:", total_params)
 
-criterion = nn.MSELoss()
+criterion = nn.MSELoss(reduction='none')
+# criterion = nn.MSELoss()
+
+# conf_criterion = nn.BCELoss(reduction="mean")
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 # scheduler = StepLR(optimizer, setp_size = 30, gamma=0.1)
 scheduler = ExponentialLR(optimizer, gamma=0.95)
@@ -263,24 +282,37 @@ best_loss = np.inf
 best_model_wts = copy.deepcopy(model.state_dict())
 best_epoch = 0
 
-num_epochs = 20
+num_epochs = 200
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     running_loss = 0.0
     # img, kps, heatmap
-    for images, kps, hmaps in train_loader: 
+    for images, confs, kps, hmaps in train_loader: 
 
         images = images.to(device)
         # angles = angles.to(device).float().view(-1, 1)  # Ensure angles are the correct shape
         hmaps = hmaps.to(device)
+        confs = confs.to(device)
 
         optimizer.zero_grad()
 
-        outputs = model(images)
-        loss = criterion(outputs, hmaps)
-        loss.backward()
+        confidences, heatmaps = model(images)
+        hm_loss = criterion(heatmaps, hmaps)
+
+        conf_mask = confs.unsqueeze(-1).unsqueeze(-1)
+        masked_mse = hm_loss * conf_mask
+
+        masked_hm_loss = masked_mse.sum() / (conf_mask.sum()+ 1e-8)
+
+        # conf_loss = F.mse_loss(confidences, confs)
+        conf_loss = F.binary_cross_entropy_with_logits(confidences, confs)
+        
+        # train_loss = hm_loss + conf_loss
+        # train_loss.backward()
+        train_loss = (masked_hm_loss + conf_loss)
+        train_loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
+        running_loss += train_loss.item()
     scheduler.step()
     current_lr = scheduler.get_last_lr()[0]
 
@@ -288,15 +320,25 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     model.eval()  # 모델을 평가 모드로 설정
     val_loss = 0.0
     with torch.no_grad():  # 그래디언트 계산 비활성화
-        for images, kps, hmaps in valid_loader:
+        for images, confs, kps, hmaps in valid_loader:
             images = images.to(device)
             # angles = angles.to(device).float().view(-1, 1)
             hmaps = hmaps.to(device)
+            confs = confs.to(device)
 
-            outputs = model(images)
-            loss = criterion(outputs, hmaps)
+            confidences, heatmaps = model(images)
+            
+            hm_loss = criterion(heatmaps, hmaps)
+            conf_mask = confs.unsqueeze(-1).unsqueeze(-1)
+            masked_mse = hm_loss * conf_mask
+            masked_hm_loss = masked_mse.sum() / (conf_mask.sum()+ 1e-8)
 
-            val_loss += loss.item()
+            # conf_loss = F.mse_loss(confidences, confs)
+            conf_loss = F.binary_cross_entropy_with_logits(confidences, confs)
+
+            # loss = criterion(heatmaps, hmaps)
+            # conf_loss = criterion(confidences, confs)
+            val_loss += (masked_hm_loss + conf_loss).item()
     
     if val_loss < best_loss:
         best_loss = val_loss
@@ -316,7 +358,7 @@ model.load_state_dict(best_model_wts)
 
 def img_preprocess(img, torch_trans = transform):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    img = cv2.resize(img, (64, 64))
+    img = cv2.resize(img, (96, 96))
     img = torch_trans(img)
     img = img.unsqueeze(0)    
     return img
@@ -329,15 +371,18 @@ def img_preprocess(img, torch_trans = transform):
 
 def post_processing(output):
     # get keypoint from heatmap
+    confidences = output[0][0]
+    heatmaps = output[1][0]
     pred_coords = []
-    for hm_idx, hm in enumerate(output[0]):
+    for hm_idx, hm in enumerate(heatmaps):
+        if confidences[hm_idx] < 0.5:
+            pred_coords.append((-1, -1))
+            continue
         idx = torch.argmax(hm)
-        y = idx // 64
-        x = idx % 64
+        y = idx // 96
+        x = idx % 96
         pred_coords.append((x.item(), y.item()))
     return pred_coords
-
-    return
     # sin_val, cos_val = output[0].cpu().detach().numpy()
 
     # angle_rad = np.arctan2(sin_val, cos_val)
@@ -369,49 +414,37 @@ model.eval()
 # diffs = []
 # correct = 0
 
-diff_kps_threshold = 2.0
+diff_kps_threshold = 10.0
 diffs_kps = []
 correct_kps = 0
 dst_path = "./kp_pred/"
 os.makedirs(dst_path, exist_ok=True)
 
 with torch.no_grad():
-    for batch_idx, (images, kps, hmaps) in enumerate(test_loader):
+    for batch_idx, (images, confs, kps, hmaps) in enumerate(test_loader):
         images = images.to(device)
+        test_img = (images.cpu().numpy()[0][0] * 255.).astype(np.uint8)
         outputs = model(images)
 
-        outputs = outputs
+        confs = confs.cpu().numpy()[0]
         kps = kps.cpu().numpy()[0]
 
         result = post_processing(outputs)
 
         result_diff = calc_diff_of_keypoints(kps, result)
 
-        print("check")
+        # print("check")
 
-    result_mean_diff = np.mean(result_diff)
+        result_mean_diff = np.mean(result_diff)
 
-    if result_mean_diff < diff_kps_threshold:
-        correct_kps += 1
-    diffs_kps.append(result_mean_diff)
-    # print("gt->pred : sp(%.2f, %.2f)->(%.2f, %.2f)(%.2f), ep(%.2f, %.2f)->(%.2f, %.2f)(%.2f)"%
-    #       (ground_truth_kps[0][0], ground_truth_kps[0][1], result[0][0], result[0][1], result_diff[0], 
-    #        ground_truth_kps[1][0], ground_truth_kps[1][1], result[1][0], result[1][1], result_diff[1]))
-    result_img = draw_point_of_keypoints(test_img, result)
-    save_path = dst_path + "%.6d.jpg"%(i)
-    cv2.imwrite(save_path, result_img)
+        if result_mean_diff < diff_kps_threshold:
+            correct_kps += 1
+        diffs_kps.append(result_mean_diff)
+        result_img = draw_point_of_keypoints(test_img, result)
+        save_path = dst_path + "%.6d.jpg"%(batch_idx)
+        cv2.imwrite(save_path, result_img)
 
-    # diff = abs(test_angle - result)
-    # diff = angle_difference(test_angle, result)
-    # if diff < angle_threshold:
-    #     correct += 1
-    # diffs.append(diff)
-    # print("gt:", test_angle, "pred:", result, "diff:", diff)
-# diffs = np.array(diffs)
-# print("acc: ", float(correct) / test_cnt )
-# print("mean/max/min diff:", np.mean(diffs), ",",np.max(diffs),",", np.min(diffs))
-
-print("acc: ", float(correct_kps) / test_cnt )
+print("acc: ", float(correct_kps) / test_size )
 print("mean/max/min diff:", np.mean(diffs_kps), ",",np.max(diffs_kps),",", np.min(diffs_kps))
 
 print("done")

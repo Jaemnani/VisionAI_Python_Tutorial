@@ -64,7 +64,7 @@ class ArrowKeypointsDataset(Dataset):
     # def __init__(self, image_dir, angle_dir, transform=None):
     def __init__(self, image_dir, angle_dir, label_dir, target_size=(64, 64), sigma=2.0, transform=None):
         self.image_dir = image_dir
-        self.image_paths = glob(self.image_dir + "*.jpg")
+        self.image_paths = glob( os.path.join(self.image_dir + "*.jpg"))
         self.angle_dir = angle_dir
         self.label_dir = label_dir
         self.target_size = target_size
@@ -79,8 +79,8 @@ class ArrowKeypointsDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         
-        lbl_path = self.label_dir + os.path.basename(img_path).replace("img_", "key_").replace('.jpg', '.txt')
-        ang_path = self.angle_dir + os.path.basename(img_path).replace("img_", "ang_").replace('.jpg', '.txt')
+        lbl_path = os.path.join(self.label_dir + os.path.basename(img_path).replace("img_", "key_").replace('.jpg', '.txt'))
+        ang_path = os.path.join(self.angle_dir + os.path.basename(img_path).replace("img_", "ang_").replace('.jpg', '.txt'))
 
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         img = cv2.resize(img, self.target_size)
@@ -89,6 +89,7 @@ class ArrowKeypointsDataset(Dataset):
             angle = float(np.array(af.readlines()).flatten()[0])
         angle_rad = np.deg2rad(angle)
         ang_label = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
+        ang_label = torch.from_numpy(ang_label).float()
         
         with open(lbl_path, 'r') as af:
             # angle = float(np.array(af.readlines()).flatten()[0])
@@ -98,7 +99,9 @@ class ArrowKeypointsDataset(Dataset):
         # angle_rad = np.deg2rad(angle)
         # label = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
         sp, ep  = kps
-        heatmap = create_keypoint_heatmap(sp, ep, self.target_size, sigma=self.sigma)
+        # heatmap = create_keypoint_heatmap(sp, ep, self.target_size, sigma=self.sigma)
+        label_points = np.array([sp, ep])
+        heatmap = create_keypoint_heatmap(label_points, self.target_size, sigma=self.sigma)
 
         if self.transform:
             img = self.transform(img)
@@ -155,6 +158,7 @@ class ArrowMultiResNet(nn.Module):
 
         self.pool = nn.MaxPool2d(2, 2)
         self.relu = nn.ReLU()
+        
         # Angle Head
         self.angle_res = ResidualBlock(channels=64)
         # 계산된 특성 맵의 크기와 필터 수를 기반으로 첫 번째 완전 연결 계층의 입력 크기 조정
@@ -184,7 +188,10 @@ class ArrowMultiResNet(nn.Module):
         # x_ang = x_ang.view(-1, 64 * 8 * 8)
         x_ang = ah.view(ah.size(0), -1)
         x_ang = self.relu(self.fc1(x_ang))
-        angle_out = self.fc2(x_ang)
+        
+        x_ang = self.dropout(x_ang) #add 
+        angle_out = F.normalize(self.fc2(x_ang), dim=1, eps=1e-6)
+        
 
         # Keypoint Head
         kh = self.kp_res(x_feat)
@@ -443,8 +450,10 @@ best_epoch = 0
 w_angle = 1.0
 w_heatmap = 1.0
 
-num_epochs = 200
+
+num_epochs = 10
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
+    model.train()
     running_loss = 0.0
     # img, kps, heatmap
     losses_angle = []
@@ -459,8 +468,11 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
         optimizer.zero_grad()
 
         angle_out, heatmap_out = model(images)
-        loss_angle = angle_criterion(angle_out, angle_label)
         loss_heatmap = heatmap_criterion(heatmap_out, heatmap_label)
+        # loss_angle = angle_criterion(angle_out, angle_label)
+        pred = angle_out
+        tgt = F.normalize(angle_label, dim=1)
+        loss_angle = (1.0 - (pred * tgt).sum(dim=1)).mean() # cosine loss
 
         losses_angle.append(loss_angle.item())
         losses_heatmap.append(loss_heatmap.item())
@@ -479,12 +491,15 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     mean_loss_angle = np.mean(losses_angle)
     mean_loss_heatmap = np.mean(losses_heatmap)
 
-    if mean_loss_angle >= mean_loss_heatmap:
-            w_angle = 1.
+    w_angle = 1.0
+    w_heatmap = 1.0
+    if mean_loss_angle > 0 and mean_loss_heatmap > 0:
+        if mean_loss_angle >= mean_loss_heatmap:
             w_heatmap = mean_loss_heatmap / mean_loss_angle
-    else:
-        w_heatmap = 1.
-        w_angle = 1.
+            w_angle   = 1.0
+        else:
+            w_angle   = mean_loss_angle / mean_loss_heatmap   # ★ 추가된 부분
+            w_heatmap = 1.0
         
     scheduler.step()
     current_lr = scheduler.get_last_lr()[0]
@@ -500,24 +515,27 @@ for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
             heatmap_label = heatmap_label.to(device)
 
             angle_out, heatmap_out = model(images)
-            loss_angle = angle_criterion(angle_out, angle_label)
             loss_heatmap = heatmap_criterion(heatmap_out, heatmap_label)
+            # loss_angle = angle_criterion(angle_out, angle_label)
+            pred = angle_out
+            tgt = F.normalize(angle_label, dim=1)
+            loss_angle = (1.0 - (pred * tgt).sum(dim=1)).mean()
 
             # outputs = model(images)
             # loss = criterion(outputs, hmaps)
             # val_loss += loss.item()
             val_loss += (loss_angle + loss_heatmap).item()
     
-    if val_loss < best_loss:
-        best_loss = val_loss
-        best_model_wts = copy.deepcopy(model.state_dict())
-        best_epoch = epoch
-        
     avg_train_loss = (running_loss / len(train_loader))
     avg_valid_loss = (val_loss / len(valid_loader))
-    print(f'Epoch [{epoch + 1}/{num_epochs}], LR={current_lr:.6f}, Train Loss: {avg_train_loss:.6f}(a:h={loss_angle:.5f}:{loss_heatmap:.5f})(wla:wlh={w_angle:.2f}:{w_heatmap:.2f}) Valid Loss: {avg_valid_loss:.6f}')
+    print(f'Epoch [{epoch + 1}/{num_epochs}], LR={current_lr:.6f}, Train Loss: {avg_train_loss:.6f}(a:h={loss_angle:.5f}:{mean_loss_heatmap:.5f})(wla:wlh={w_angle:.2f}:{w_heatmap:.2f}) Valid Loss: {avg_valid_loss:.6f}')
     
-    early_stopping(val_loss, model)
+    if avg_valid_loss < best_loss:
+        best_loss = avg_valid_loss
+        best_model_wts = copy.deepcopy(model.state_dict())
+        best_epoch = epoch
+
+    early_stopping(avg_valid_loss, model)
     if early_stopping.early_stop:
         print("Early stopping triggered !")
         break
@@ -537,6 +555,33 @@ def angle_difference(a, b):
         diff = 360 - diff
     return diff
 
+def decode_hm_softargmax_local(hm, patch=5, tau=0.25):
+    """
+    hm: (H, W) torch.Tensor
+    1) 정수 argmax
+    2) 주변 patch에서만 softmax(온도 tau)로 서브픽셀 보정
+    """
+    H, W = hm.shape
+    idx = torch.argmax(hm)
+    y0 = (idx // W).item()
+    x0 = (idx %  W).item()
+
+    r = patch // 2
+    y1, y2 = max(0, y0 - r), min(H, y0 + r + 1)
+    x1, x2 = max(0, x0 - r), min(W, x0 + r + 1)
+
+    sub = hm[y1:y2, x1:x2]
+    sub = (sub - sub.max()) / tau              # 온도 스케일
+    prob = torch.softmax(sub.reshape(-1), dim=0).reshape_as(sub)
+
+    yy = torch.arange(y1, y2, device=hm.device, dtype=hm.dtype).unsqueeze(1).expand(y2 - y1, x2 - x1)
+    xx = torch.arange(x1, x2, device=hm.device, dtype=hm.dtype).unsqueeze(0).expand(y2 - y1, x2 - x1)
+
+    x = (prob * xx).sum()
+    y = (prob * yy).sum()
+    return float(x), float(y), (x0, y0)   # 디버깅용으로 정수 argmax도 반환
+
+
 def post_processing(output):
     output_ang, output_heatmap = output
 
@@ -548,12 +593,11 @@ def post_processing(output):
 
     # get keypoint from heatmap
     pred_coords = []
+    test_coords = []
     for hm_idx, hm in enumerate(output_heatmap[0]):
-        idx = torch.argmax(hm)
-        y = idx // 64
-        x = idx % 64
-        pred_coords.append((x.item(), y.item()))
-    
+        x_sa, y_sa, xy_ha = decode_hm_softargmax_local(hm)
+        test_coords.append(xy_ha)
+        pred_coords.append((x_sa, y_sa))
     return angle_deg, pred_coords
 
 def calc_diff_of_keypoints(gt_kps, pred_kps):
@@ -584,7 +628,8 @@ for i in range(test_cnt):
     test_img, test_angle, test_sp, test_ep = make_arrow_image()
     ground_truth_kps = np.vstack((test_sp, test_ep))
     input_image = img_preprocess(test_img).to(device)
-    output = model(input_image)
+    with torch.no_grad():
+        output = model(input_image)
     angle_result, heatmap_result = post_processing(output)
 
     result_diff = calc_diff_of_keypoints(ground_truth_kps, heatmap_result)
