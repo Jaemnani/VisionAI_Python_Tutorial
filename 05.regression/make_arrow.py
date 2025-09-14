@@ -11,10 +11,17 @@ def create_heatmap(h, w, px, py, sigma=2.0):
     heatmap = np.exp(-((xx - px)**2 + (yy - py)**2) / (2 * sigma**2))
     return heatmap
 
-def create_keypoint_heatmap(sp, ep, img_size=(64, 64), sigma=2.0):
-    heatmap_sp = create_heatmap(img_size[1], img_size[0], sp[0], sp[1], sigma=sigma)
-    heatmap_ep = create_heatmap(img_size[1], img_size[0], ep[0], ep[1], sigma=sigma)
-    heatmap_2ch = np.stack([heatmap_sp, heatmap_ep], axis=0)
+# def create_keypoint_heatmap(sp, ep, img_size=(64, 64), sigma=2.0):
+def create_keypoint_heatmap(kps, img_size=(64, 64), sigma=2.0):
+    heatmaps = []
+    for idx, kp in enumerate(kps):
+        heatmap = create_heatmap(img_size[1], img_size[0], kp[0], kp[1], sigma=sigma)
+        heatmaps.append(heatmap)
+    heatmap_2ch = np.array(heatmaps)
+
+    # heatmap_sp = create_heatmap(img_size[1], img_size[0], sp[0], sp[1], sigma=sigma)
+    # heatmap_ep = create_heatmap(img_size[1], img_size[0], ep[0], ep[1], sigma=sigma)
+    # heatmap_2ch = np.stack([heatmap_sp, heatmap_ep], axis=0)
     return heatmap_2ch
 
 def make_arrow_image(
@@ -81,37 +88,40 @@ def make_arrow_image(
     # tmp = cv2.circle(rotated.copy(), rotated_sp, radius=3, color=(0, 0, 255), thickness=-1)
     # tmp = cv2.circle(tmp, rotated_ep, radius=3, color=(0, 0, 255), thickness=-1)
 
-    kps_2ch = create_keypoint_heatmap(rotated_sp, rotated_ep, img_size=canvas_size, sigma=2.0)
+    # kps_2ch = create_keypoint_heatmap(rotated_sp, rotated_ep, img_size=canvas_size, sigma=2.0)
+    rotated_keypoints = np.array([rotated_sp, rotated_ep])
+    kps_2ch = create_keypoint_heatmap(rotated_keypoints, img_size=canvas_size, sigma=2.0)
 
     return rotated, angle, rotated_sp, rotated_ep
 
 color_map = [
     (  0,   0, 255),  #  0/19: (R=255, G=0, B=0) -> BGR=(0,0,255)
-    # (  7,   0, 248),  #  1/19
-    # ( 13,   0, 242),  #  2/19
-    # ( 20,   0, 235),  #  3/19
-    # ( 27,   0, 228),  #  4/19
-    # ( 34,   0, 222),  #  5/19
-    # ( 40,   0, 215),  #  6/19
-    # ( 47,   0, 208),  #  7/19
-    # ( 54,   0, 202),  #  8/19
-    # ( 61,   0, 195),  #  9/19
-    # ( 67,   0, 188),  # 10/19
-    # ( 74,   0, 181),  # 11/19
-    # ( 81,   0, 175),  # 12/19
-    # ( 88,   0, 168),  # 13/19
-    # ( 94,   0, 161),  # 14/19
-    # (101,   0, 155),  # 15/19
-    # (108,   0, 148),  # 16/19
-    # (115,   0, 141),  # 17/19
-    # (121,   0, 135),  # 18/19
+    (  7,   0, 248),  #  1/19
+    ( 13,   0, 242),  #  2/19
+    ( 20,   0, 235),  #  3/19
+    ( 27,   0, 228),  #  4/19
+    ( 34,   0, 222),  #  5/19
+    ( 40,   0, 215),  #  6/19
+    ( 47,   0, 208),  #  7/19
+    ( 54,   0, 202),  #  8/19
+    ( 61,   0, 195),  #  9/19
+    ( 67,   0, 188),  # 10/19
+    ( 74,   0, 181),  # 11/19
+    ( 81,   0, 175),  # 12/19
+    ( 88,   0, 168),  # 13/19
+    ( 94,   0, 161),  # 14/19
+    (101,   0, 155),  # 15/19
+    (108,   0, 148),  # 16/19
+    (115,   0, 141),  # 17/19
+    (121,   0, 135),  # 18/19
     (128,   0, 128),  # 19/19: (R=128, G=0, B=128) -> BGR=(128,0,128)
 ]
 
 def draw_point_of_keypoints(img, keypoints):
     img = img.copy()
     for kp_idx, kp in enumerate(keypoints):
-        img = cv2.circle(img, kp, radius=3, color=color_map[kp_idx], thickness=-1)
+        kp_int = np.round(kp).astype(int)
+        img = cv2.circle(img, kp_int, radius=3, color=color_map[kp_idx], thickness=-1)
     return img
     
 def main():

@@ -118,8 +118,8 @@ class ArrowNet(nn.Module):
         self.fc1 = nn.Linear(64 * 8 * 8, 128)  # 특성 맵 크기와 채널 수에 맞춰 조정
         self.fc2 = nn.Linear(128, 2)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=0.25)
 
+        self.dropout = nn.Dropout(p=0.25)
 
     def forward(self, x): # torch.Size([32, 1, 64, 64])
         # x = self.pool(self.relu(self.conv1(x))) # torch.Size([32, 16, 32, 32])
@@ -145,7 +145,6 @@ class ArrowNet(nn.Module):
         x = self.relu(self.fc1(x)) # torch.Size([32, 128])
         x = self.dropout(x)
         x = self.fc2(x) # torch.Size([32, 2])
-        
         return x
 
 class DeeperArrowNet(nn.Module):
@@ -227,8 +226,8 @@ valid_loader = DataLoader(valid_dataset, batch_size=128, shuffle=False, drop_las
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
 
-model = ArrowNet().to(device)
-# model = DeeperArrowNet().to(device)
+# model = ArrowNet().to(device)
+model = DeeperArrowNet().to(device)
 
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of parameters:", total_params)
@@ -244,7 +243,7 @@ best_loss = np.inf
 best_model_wts = copy.deepcopy(model.state_dict())
 best_epoch = 0
 
-num_epochs = 20
+num_epochs = 200
 for epoch in range(num_epochs):  # 여기서는 10 에포크로 설정
     running_loss = 0.0
     for images, labels in train_loader:

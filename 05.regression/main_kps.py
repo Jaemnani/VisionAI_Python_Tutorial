@@ -62,7 +62,7 @@ class EarlyStopping:
 
 class ArrowKeypointsDataset(Dataset):
     # def __init__(self, image_dir, angle_dir, transform=None):
-    def __init__(self, image_dir, label_dir, target_size=(64, 64), sigma=2.0, transform=None, kpts_cnt = 8):
+    def __init__(self, image_dir, label_dir, target_size=(64, 64), sigma=2.0, transform=None):
         self.image_dir = image_dir
         self.image_paths = glob(self.image_dir + "*.jpg")
         # self.angle_dir = angle_dir
@@ -71,8 +71,6 @@ class ArrowKeypointsDataset(Dataset):
         
         self.sigma = sigma
         self.transform = transform
-
-        self.kpts_cnt = kpts_cnt
         
 
     def __len__(self):
@@ -89,14 +87,12 @@ class ArrowKeypointsDataset(Dataset):
             # angle = int(np.array(af.readlines()).flatten()[0]) / 360.
             # angle = float(np.array(af.readlines()).flatten()[0])
             labels = [pts.split(",") for pts in af.readlines()]
-            kps = np.array(labels).flatten().astype(float).reshape(self.kpts_cnt,-1) # sp, ep
+            kps = np.array(labels).flatten().astype(float).reshape(-1,2) # sp, ep
             
         # angle_rad = np.deg2rad(angle)
         # label = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
-        
-        # sp, ep  = kps
-        # heatmap = create_keypoint_heatmap(sp, ep, self.target_size, sigma=self.sigma)
-        heatmap = create_keypoint_heatmap(kps, self.target_size, sigma=self.sigma)
+        sp, ep  = kps
+        heatmap = create_keypoint_heatmap(sp, ep, self.target_size, sigma=self.sigma)
 
         if self.transform:
             img = self.transform(img)
@@ -139,9 +135,7 @@ class ArrowKeypointHeatmapNet(nn.Module):
         # self.fc2 = nn.Linear(128, 2)
 
         # self.dropout = nn.Dropout(p=0.25)
-        
-        # self.conv4 = nn.Conv2d(64, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
-        self.conv4 = nn.Conv2d(64, 8, kernel_size=3, padding=1) # heatmap 8, pod
+        self.conv4 = nn.Conv2d(64, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
 
     def forward(self, x): # torch.Size([32, 1, 64, 64])
         # x = self.pool(self.relu(self.conv1(x))) # torch.Size([32, 16, 32, 32])
@@ -197,9 +191,7 @@ class DeeperArrowKeypointHeatmapNet(nn.Module):
         # self.fc1 = nn.Linear(128 * 4 * 4, 128)
         # self.dropout = nn.Dropout(p=0.5)
         # self.fc2 = nn.Linear(128, 2)
-
-        # self.conv4 = nn.Conv2d(64, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
-        self.conv4 = nn.Conv2d(64, 8, kernel_size=3, padding=1) # heatmap 8, pod
+        self.conv4 = nn.Conv2d(128, 2, kernel_size=3, padding=1) # heatmap 2, sp, ep
 
     def forward(self, x):
         # 차례로 블록 통과
@@ -238,13 +230,10 @@ transform = transforms.Compose([
 
 dataset = ArrowKeypointsDataset(image_dir='./images/', label_dir='./keypoints/', transform=transform)
 train_size = int(len(dataset) * 0.8)
-# valid_size = len(dataset) - train_size
-valid_size = int(len(dataset) * 0.1)
-test_size = len(dataset) - train_size - valid_size
-train_dataset, valid_dataset, test_dataset = random_split(dataset, [train_size, valid_size, test_size])
+valid_size = len(dataset) - train_size
+train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=False)
 valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, drop_last=False)
-test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, drop_last=False)
 
 model = ArrowKeypointHeatmapNet().to(device)
 # model = DeeperArrowKeypointHeatmapNet().to(device)
@@ -375,28 +364,23 @@ correct_kps = 0
 dst_path = "./kp_pred/"
 os.makedirs(dst_path, exist_ok=True)
 
-with torch.no_grad():
-    for batch_idx, (images, kps, hmaps) in enumerate(test_loader):
-        images = images.to(device)
-        outputs = model(images)
+test_cnt = 100
+for i in range(test_cnt):
+    test_img, test_angle, test_sp, test_ep = make_arrow_image()
+    ground_truth_kps = np.vstack((test_sp, test_ep))
+    input_image = img_preprocess(test_img).to(device)
+    output = model(input_image)
+    result = post_processing(output)
 
-        outputs = outputs
-        kps = kps.cpu().numpy()[0]
-
-        result = post_processing(outputs)
-
-        result_diff = calc_diff_of_keypoints(kps, result)
-
-        print("check")
-
+    result_diff = calc_diff_of_keypoints(ground_truth_kps, result)
     result_mean_diff = np.mean(result_diff)
 
     if result_mean_diff < diff_kps_threshold:
         correct_kps += 1
     diffs_kps.append(result_mean_diff)
-    # print("gt->pred : sp(%.2f, %.2f)->(%.2f, %.2f)(%.2f), ep(%.2f, %.2f)->(%.2f, %.2f)(%.2f)"%
-    #       (ground_truth_kps[0][0], ground_truth_kps[0][1], result[0][0], result[0][1], result_diff[0], 
-    #        ground_truth_kps[1][0], ground_truth_kps[1][1], result[1][0], result[1][1], result_diff[1]))
+    print("gt->pred : sp(%.2f, %.2f)->(%.2f, %.2f)(%.2f), ep(%.2f, %.2f)->(%.2f, %.2f)(%.2f)"%
+          (ground_truth_kps[0][0], ground_truth_kps[0][1], result[0][0], result[0][1], result_diff[0], 
+           ground_truth_kps[1][0], ground_truth_kps[1][1], result[1][0], result[1][1], result_diff[1]))
     result_img = draw_point_of_keypoints(test_img, result)
     save_path = dst_path + "%.6d.jpg"%(i)
     cv2.imwrite(save_path, result_img)
